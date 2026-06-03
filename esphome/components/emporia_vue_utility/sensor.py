@@ -1,5 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import automation
+from esphome.automation import maybe_simple_id
 from esphome.components import uart, sensor
 from esphome.const import (
     CONF_DEBUG,
@@ -80,3 +82,18 @@ async def to_code(config):
         cg.add(var.set_debug(config[CONF_DEBUG]))
 
     cg.add(var.set_polling_enabled(config["polling_enabled"]))
+
+
+FactoryResetAction = emporia_vue_utility_ns.class_(
+    "FactoryResetAction", automation.Action
+)
+
+
+@automation.register_action(
+    "emporia_vue_utility.factory_reset",
+    FactoryResetAction,
+    maybe_simple_id({cv.Required(CONF_ID): cv.use_id(EmporiaVueUtility)}),
+)
+async def factory_reset_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)

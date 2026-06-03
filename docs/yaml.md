@@ -159,3 +159,29 @@ sensor:
     debug: true
     ...
 ```
+
+### Actions
+
+#### `emporia_vue_utility.factory_reset`
+
+Sends the `d` command to the MGM111. This is the same command the stock firmware
+issues when the physical button is held for ~5 seconds, and is believed to
+factory-reset the chip (wiping HAN credentials). After triggering it your
+utility may need to re-provision the device before meter readings resume —
+treat it the same as the button hold.
+
+The MGM111 sends no response to this command.
+
+```yaml
+sensor:
+  - platform: emporia_vue_utility
+    id: vue_sensor
+    ...
+
+button:
+  - platform: template
+    name: '${name} MGM Factory Reset'
+    on_press:
+      then:
+        - emporia_vue_utility.factory_reset: vue_sensor
+```

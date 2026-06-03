@@ -7,6 +7,7 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
+#include "esphome/core/automation.h"
 
 // If the instant watts being consumed meter reading is outside of these ranges,
 // the sample will be ignored which helps prevent garbage data from polluting
@@ -782,6 +783,21 @@ class EmporiaVueUtility : public PollingComponent, public uart::UARTDevice {
     led_wifi(false);
   }
 
+  // Send the "d" command. This is what the stock firmware sends after the
+  // physical button is held for ~5 seconds. The MGM111 returns no response.
+  // It is believed to factory-reset the chip (wiping HAN credentials), which
+  // means the meter may need to be re-provisioned by your utility before the
+  // device will report readings again.
+  void factory_reset() {
+    const uint8_t msg[] = {0x24, 0x64, 0x0d};
+    ESP_LOGW(TAG, "Sending MGM factory reset ('d'). HAN credentials may be wiped;");
+    ESP_LOGW(TAG, "your utility may need to re-provision the device.");
+    write_array(msg, sizeof(msg));
+    flush();
+    led_link(false);
+    led_wifi(false);
+  }
+
   void clear_serial_input() {
     write(0x0d);
     flush();
@@ -853,6 +869,15 @@ static inline void set_pin_to_output(gpio_num_t pin) {
   gpio_reset_pin(pin);
   gpio_set_direction(pin, GPIO_MODE_OUTPUT);
 }
+
+template<typename... Ts> class FactoryResetAction : public Action<Ts...> {
+ public:
+  explicit FactoryResetAction(EmporiaVueUtility *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->factory_reset(); }
+
+ protected:
+  EmporiaVueUtility *parent_;
+};
 
 }  // namespace emporia_vue_utility
 }  // namespace esphome
