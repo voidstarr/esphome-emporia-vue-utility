@@ -37,6 +37,7 @@ void EmporiaVueUtility::loop() {
 
   msg_len = read_msg();
   now = steady_clock::now();
+  handle_gpio_scan();
 
   if (msg_len != 0) {
     msg_type = input_buffer.data[2];
@@ -70,10 +71,12 @@ void EmporiaVueUtility::loop() {
         break;
       case 'f':
         if (!handle_resp_firmware_ver()) {
-          led_wifi(true);
-          if (startup_step == 0) {
-            startup_step++;
-            send_mac_req();
+          if (scan_state_ == ScanState::IDLE) {
+            led_wifi(true);
+            if (startup_step == 0) {
+              startup_step++;
+              send_mac_req();
+            }
           }
         }
         break;
@@ -110,6 +113,9 @@ void EmporiaVueUtility::loop() {
     }
     pos = 0;
   }
+
+  // Suspend normal startup/meter logic while a GPIO scan is running.
+  if (scan_state_ != ScanState::IDLE) return;
 
   if (mgm_firmware_ver < 1 && now >= next_version_request) {
     // Something's wrong, do the startup sequence again.

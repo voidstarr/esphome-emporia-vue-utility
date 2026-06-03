@@ -88,6 +88,10 @@ FactoryResetAction = emporia_vue_utility_ns.class_(
     "FactoryResetAction", automation.Action
 )
 
+ScanResetPinAction = emporia_vue_utility_ns.class_(
+    "ScanResetPinAction", automation.Action
+)
+
 
 @automation.register_action(
     "emporia_vue_utility.factory_reset",
@@ -95,5 +99,15 @@ FactoryResetAction = emporia_vue_utility_ns.class_(
     maybe_simple_id({cv.Required(CONF_ID): cv.use_id(EmporiaVueUtility)}),
 )
 async def factory_reset_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "emporia_vue_utility.scan_reset_pin",
+    ScanResetPinAction,
+    maybe_simple_id({cv.Required(CONF_ID): cv.use_id(EmporiaVueUtility)}),
+)
+async def scan_reset_pin_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)

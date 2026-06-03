@@ -44,6 +44,17 @@
 
 static const char *TAG = "emporia_vue_utility";
 
+// Safe ESP32 GPIOs to probe as potential MGM111 RESETn connections.
+// Excluded: flash SPI (6-11), used by component (21,22,32,33), P1 JTAG (12-15),
+// boot-strapping pins (0,2,5,15), and input-only (34-39).
+static const gpio_num_t MGM_SCAN_PINS[] = {
+    GPIO_NUM_4,  GPIO_NUM_16, GPIO_NUM_17, GPIO_NUM_18,
+    GPIO_NUM_19, GPIO_NUM_23, GPIO_NUM_25, GPIO_NUM_26, GPIO_NUM_27};
+static const int MGM_SCAN_PINS_LEN =
+    sizeof(MGM_SCAN_PINS) / sizeof(MGM_SCAN_PINS[0]);
+
+enum class ScanState : uint8_t { IDLE, PULSE, DEASSERT, WAIT_FAST, WAIT_SLOW };
+
 namespace esphome {
 namespace emporia_vue_utility {
 
@@ -722,6 +733,10 @@ class EmporiaVueUtility : public PollingComponent, public uart::UARTDevice {
   }
 
   int handle_resp_firmware_ver() {
+    if (scan_state_ != ScanState::IDLE) {
+      on_scan_firmware_resp();
+      return 0;
+    }
     struct Ver *ver;
     ver = &input_buffer.ver;
 
@@ -781,6 +796,103 @@ class EmporiaVueUtility : public PollingComponent, public uart::UARTDevice {
     ESP_LOGD(TAG, "Sending firmware version request");
     write_array(msg, sizeof(msg));
     led_wifi(false);
+  }
+
+  // Sweep candidate ESP32 GPIOs to find which one is wired to MGM111 RESETn.
+  // Each pin is briefly driven low; if the MGM111 reboots (delayed firmware-
+  // version response), that GPIO is reported in the logs.
+  // Meter readings are suspended for the duration (~%d * 7s).
+  void start_gpio_scan() {
+    if (scan_state_ != ScanState::IDLE) {
+      ESP_LOGW(TAG, "GPIO scan already in progress");
+      return;
+    }
+    ESP_LOGI(TAG, "=== Starting MGM RESETn GPIO scan (%d candidates) ===",
+             MGM_SCAN_PINS_LEN);
+    ESP_LOGI(TAG, "Meter readings suspended for ~%ds.",
+             MGM_SCAN_PINS_LEN * 7);
+    scan_idx_ = 0;
+    scan_pause_until_ = min_steady_time_point;
+    scan_state_ = ScanState::PULSE;
+  }
+
+  // Called every loop() iteration while a scan is running.
+  void handle_gpio_scan() {
+    if (scan_state_ == ScanState::IDLE) return;
+
+    gpio_num_t pin = MGM_SCAN_PINS[scan_idx_];
+
+    switch (scan_state_) {
+      case ScanState::PULSE:
+        if (now < scan_pause_until_) return;
+        ESP_LOGI(TAG, "[Scan %d/%d] Probing GPIO%d...",
+                 scan_idx_ + 1, MGM_SCAN_PINS_LEN, (int)pin);
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 1);
+        delay(5);
+        gpio_set_level(pin, 0);  // Assert reset (active-low)
+        scan_fast_deadline_ = now + std::chrono::milliseconds(400);
+        scan_state_ = ScanState::DEASSERT;
+        break;
+
+      case ScanState::DEASSERT:
+        if (now < scan_fast_deadline_) return;
+        gpio_set_level(pin, 1);
+        gpio_reset_pin(pin);
+        clear_serial_input();
+        send_version_req();
+        scan_fast_deadline_ = now + std::chrono::milliseconds(300);
+        scan_slow_deadline_ = now + std::chrono::seconds(4);
+        scan_state_ = ScanState::WAIT_FAST;
+        break;
+
+      case ScanState::WAIT_FAST:
+        if (now >= scan_fast_deadline_)
+          scan_state_ = ScanState::WAIT_SLOW;
+        break;
+
+      case ScanState::WAIT_SLOW:
+        if (now >= scan_slow_deadline_) {
+          ESP_LOGI(TAG, "[Scan] GPIO%d: no response - not RESETn", (int)pin);
+          scan_advance_();
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  // Called from handle_resp_firmware_ver() when a scan is in progress.
+  void on_scan_firmware_resp() {
+    gpio_num_t pin = MGM_SCAN_PINS[scan_idx_];
+    if (scan_state_ == ScanState::WAIT_FAST) {
+      // Response came immediately: MGM was still running, pin is not RESETn.
+      ESP_LOGI(TAG, "[Scan] GPIO%d: immediate response - not RESETn", (int)pin);
+      scan_advance_();
+    } else if (scan_state_ == ScanState::WAIT_SLOW) {
+      // Response came after delay: MGM rebooted, this pin IS RESETn.
+      ESP_LOGW(TAG, "");
+      ESP_LOGW(TAG, "=====================================");
+      ESP_LOGW(TAG, "  FOUND: MGM RESETn = GPIO%d", (int)pin);
+      ESP_LOGW(TAG, "=====================================");
+      ESP_LOGW(TAG, "");
+      scan_advance_();
+    }
+  }
+
+  void scan_advance_() {
+    scan_idx_++;
+    if (scan_idx_ >= MGM_SCAN_PINS_LEN) {
+      ESP_LOGI(TAG, "=== GPIO scan complete. See FOUND lines above. ===");
+      scan_state_ = ScanState::IDLE;
+      mgm_firmware_ver = 0;        // triggers startup restart in loop()
+      ready_to_read_meter_ = false;
+    } else {
+      scan_pause_until_ = now + std::chrono::seconds(2);
+      scan_state_ = ScanState::PULSE;
+    }
   }
 
   // Send the "d" command. This is what the stock firmware sends after the
@@ -863,6 +975,12 @@ class EmporiaVueUtility : public PollingComponent, public uart::UARTDevice {
   sensor::Sensor *energy_export_sensor_{nullptr};
   sensor::Sensor *energy_import_sensor_{nullptr};
   bool ready_to_read_meter_ = false;
+  // GPIO scan state
+  ScanState scan_state_ = ScanState::IDLE;
+  int scan_idx_ = 0;
+  steady_time_point scan_pause_until_ = min_steady_time_point;
+  steady_time_point scan_fast_deadline_ = min_steady_time_point;
+  steady_time_point scan_slow_deadline_ = min_steady_time_point;
 };
 
 static inline void set_pin_to_output(gpio_num_t pin) {
@@ -874,6 +992,15 @@ template<typename... Ts> class FactoryResetAction : public Action<Ts...> {
  public:
   explicit FactoryResetAction(EmporiaVueUtility *parent) : parent_(parent) {}
   void play(Ts... x) override { this->parent_->factory_reset(); }
+
+ protected:
+  EmporiaVueUtility *parent_;
+};
+
+template<typename... Ts> class ScanResetPinAction : public Action<Ts...> {
+ public:
+  explicit ScanResetPinAction(EmporiaVueUtility *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->start_gpio_scan(); }
 
  protected:
   EmporiaVueUtility *parent_;
